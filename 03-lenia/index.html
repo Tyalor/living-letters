@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lenia</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --border: #2a2f3a; --text: #e6e8ee; --muted: #8b93a7;
+    --accent: #5ee0a0; --accent-dim: #2f7a58;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0 12px 0 0; letter-spacing: .02em; }
+  button, select, input[type=text] { background: #222733; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 13px; }
+  button, select { cursor: pointer; }
+  button:hover { border-color: var(--accent-dim); }
+  button.primary { background: var(--accent); color: #0b1a12; border-color: var(--accent); font-weight: 600; min-width: 72px; }
+  button.primary:hover { filter: brightness(1.08); }
+  input[type=text] { width: 120px; text-transform: uppercase; letter-spacing: .05em; padding: 6px 10px; }
+  input[type=text]:focus { outline: none; border-color: var(--accent-dim); }
+  label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  input[type=range] { width: 100px; accent-color: var(--accent); }
+  .stats { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--text); font-weight: 600; }
+  main { flex: 1; position: relative; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  .hint { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--muted); background: rgba(24,27,34,.85); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); pointer-events: none; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lenia</h1>
+  <button id="play" class="primary">Play</button>
+  <button id="step">Step</button>
+  <button id="random">Spawn</button>
+  <button id="clear">Clear</button>
+  <input type="text" id="text" value="LIFE" maxlength="24" placeholder="Text" title="Text to form at the center">
+  <button id="form">Form text</button>
+  <select id="species" title="Creature species (sets the rule parameters)"></select>
+  <label>Speed <input type="range" id="speed" min="1" max="60" value="20"> <span id="speedVal">20</span>/s</label>
+  <label>Grid <select id="res"><option value="128">128</option><option value="256" selected>256</option><option value="512">512</option></select></label>
+  <div class="stats">Step <b id="gen">0</b> · Mass <b id="mass">0</b></div>
+</header>
+<main>
+  <canvas id="c"></canvas>
+  <div class="hint">Drag to paint · Space = play/pause · N = step · R = spawn · C = clear · T = form text</div>
+</main>
+<script src="lenia.js"></script>
+<script src="creatures.js"></script>
+<script>
+(() => {
+  const { Lenia, valueNoise } = LeniaLib;
+  const CREATURES = LENIA_CREATURES;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  let L = null, cols = 0, rows = 0;
+  let species = CREATURES[0];
+  let running = false, generation = 0;
+  let sps = 20, lastTick = 0;
+  let intro = null;
+
+  // offscreen buffer for the field
+  const buf = document.createElement('canvas');
+  const bctx = buf.getContext('2d');
+  let img = null;
+
+  // ---- colour map: bg -> deep teal -> accent green -> near white
+  const STOPS = [[0,[15,17,21]],[0.18,[16,48,58]],[0.5,[38,150,120]],[0.8,[94,224,160]],[1,[236,255,244]]];
+  const LUT = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255; let k = 0;
+    while (k < STOPS.length - 2 && v > STOPS[k + 1][0]) k++;
+    const [a, ca] = STOPS[k], [b, cb] = STOPS[k + 1], t = (v - a) / (b - a);
+    for (let c = 0; c < 3; c++) LUT[i * 3 + c] = ca[c] + (cb[c] - ca[c]) * t;
+  }
+
+  function setup(keepField) {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const newCols = +$('res').value;
+    const newRows = 1 << Math.max(4, Math.round(Math.log2(newCols * h / Math.max(1, w))));
+    const old = L;
+    const oldCols = cols, oldRows = rows;
+    cols = newCols; rows = newRows;
+    L = new Lenia(cols, rows, { R: 13, mu: species.m, sigma: species.s, dt: 1 / species.T });
+    if (keepField && old) {
+      for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++)
+        L.A[y * cols + x] = old.A[Math.floor(y * oldRows / rows) * oldCols + Math.floor(x * oldCols / cols)];
+    }
+    buf.width = cols; buf.height = rows;
+    img = bctx.createImageData(cols, rows);
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(w * dpr); canvas.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function draw() {
+    const A = L.A, d = img.data;
+    let mass = 0;
+    for (let i = 0; i < L.n; i++) {
+      const v = A[i]; mass += v;
+      const k = (v * 255) | 0;
+      d[i * 4] = LUT[k * 3]; d[i * 4 + 1] = LUT[k * 3 + 1]; d[i * 4 + 2] = LUT[k * 3 + 2]; d[i * 4 + 3] = 255;
+    }
+    bctx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(buf, 0, 0, canvas.clientWidth, canvas.clientHeight);
+    $('gen').textContent = generation;
+    $('mass').textContent = mass.toFixed(0);
+  }
+
+  function step() { L.step(); generation++; }
+
+  function loop(t) {
+    if (t - lastTick >= 1000 / sps) {
+      lastTick = t;
+      if (intro) tickIntro(t);
+      else if (running) { step(); draw(); }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function setRunning(v) { running = v; $('play').textContent = running ? 'Pause' : 'Play'; }
+
+  // ---- creatures
+  function orient(cells) {
+    // random rotation (0/90/180/270) and flip
+    let c = cells.map(r => r.slice());
+    const rot = (Math.random() * 4) | 0;
+    for (let k = 0; k < rot; k++) c = c[0].map((_, x) => c.map(r => r[x]).reverse());
+    if (Math.random() < 0.5) c = c.map(r => r.slice().reverse());
+    return c;
+  }
+  function stamp(cells, ox, oy, scale = 1) {
+    for (let y = 0; y < cells.length; y++) for (let x = 0; x < cells[y].length; x++) {
+      const v = cells[y][x] * scale; if (!v) continue;
+      const gx = ((ox + x) % cols + cols) % cols, gy = ((oy + y) % rows + rows) % rows;
+      const i = gy * cols + gx;
+      L.A[i] = Math.min(1, L.A[i] + v);
+    }
+  }
+  function spawn() {
+    intro = null;
+    L.clear(); generation = 0;
+    const count = Math.max(3, Math.round(L.n / 5500));
+    for (let k = 0; k < count; k++) {
+      const c = orient(species.cells);
+      stamp(c, (Math.random() * cols) | 0, (Math.random() * rows) | 0);
+    }
+    // a little drifting dust that fades on its own
+    const n = valueNoise(cols, rows, 5);
+    for (let i = 0; i < L.n; i++) if (n[i] > 0.78) L.A[i] = Math.min(1, L.A[i] + (n[i] - 0.78) * 2.5);
+    draw();
+  }
+  function clearField() { intro = null; L.clear(); generation = 0; draw(); }
+
+  // ---- text target (continuous, hand-ish)
+  const textCanvas = document.createElement('canvas');
+  const tctx = textCanvas.getContext('2d');
+  function textMask(str) {
+    const mask = new Float32Array(cols * rows);
+    str = (str || '').trim().toUpperCase();
+    if (!str) return mask;
+    textCanvas.width = cols; textCanvas.height = rows;
+    tctx.clearRect(0, 0, cols, rows);
+    const FONT = '"Marker Felt", "Chalkboard SE", "Comic Sans MS", "Segoe Print", cursive';
+    let fontPx = Math.floor(rows * 0.5);
+    tctx.font = `bold ${fontPx}px ${FONT}`;
+    const w = tctx.measureText(str).width;
+    if (w > cols * 0.8) fontPx = Math.floor(fontPx * (cols * 0.8) / w);
+    fontPx = Math.max(6, fontPx);
+    tctx.font = `bold ${fontPx}px ${FONT}`;
+    tctx.textAlign = 'center'; tctx.textBaseline = 'middle';
+    tctx.fillStyle = '#fff';
+    tctx.save();
+    tctx.translate(cols / 2 + (Math.random() - 0.5) * cols * 0.04, rows / 2 + (Math.random() - 0.5) * rows * 0.05);
+    tctx.rotate((Math.random() - 0.5) * 0.09);
+    tctx.fillText(str, 0, 0);
+    tctx.restore();
+    const px = tctx.getImageData(0, 0, cols, rows).data;
+    const wob = valueNoise(cols, rows, 3), wob2 = valueNoise(cols, rows, 9);
+    for (let i = 0; i < cols * rows; i++) {
+      let v = px[i * 4 + 3] / 255;
+      if (v > 0) v = Math.min(1, v * (0.55 + 0.6 * wob[i]) + 0.15 * wob2[i]); // uneven ink
+      mask[i] = v;
+    }
+    // rough the edges: bite some boundary cells, bleed a little outside
+    const out = new Float32Array(mask);
+    for (let y = 1; y < rows - 1; y++) for (let x = 1; x < cols - 1; x++) {
+      const i = y * cols + x;
+      const nb = mask[i-1] + mask[i+1] + mask[i-cols] + mask[i+cols];
+      if (mask[i] > 0.3 && nb < 3 && Math.random() < 0.2) out[i] *= Math.random() * 0.4;
+      else if (mask[i] < 0.05 && nb > 0.5 && Math.random() < 0.1) out[i] = 0.2 + Math.random() * 0.5;
+    }
+    return out;
+  }
+
+  // ---- intro: free-running Lenia, then the field is nudged into the word, held, released
+  function startIntro(str, duration = 6000, freeFor = 4000) {
+    setRunning(false);
+    spawn();
+    const target = textMask(str);
+    const n1 = valueNoise(cols, rows, 24), n2 = valueNoise(cols, rows, 8);
+    const delay = new Float32Array(L.n);
+    const cx = cols / 2, cy = rows / 2, maxR = Math.hypot(cx, cy);
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+      const i = y * cols + x;
+      const r = Math.hypot(x - cx, y - cy) / maxR;
+      delay[i] = 0.1 + 0.55 * n1[i] + 0.15 * n2[i] + 0.2 * r;
+    }
+    intro = { target, delay, start: performance.now(), duration, freeFor, phase: 'free', holdUntil: 0 };
+  }
+
+  function tickIntro(t) {
+    const { target, delay } = intro;
+    const elapsed = t - intro.start - intro.freeFor;
+    if (elapsed < 0) { step(); draw(); return; }            // phase 1: just Lenia
+    if (intro.phase === 'hold') {                           // phase 3: word breathes, lightly held
+      step();
+      for (let i = 0; i < L.n; i++) L.A[i] += (target[i] - L.A[i]) * 0.5;
+      draw();
+      if (t >= intro.holdUntil) { intro = null; setRunning(true); }
+      return;
+    }
+    const p = Math.min(1, elapsed / intro.duration);        // phase 2: forming
+    const e = p * p * (3 - 2 * p);
+    step();
+    const A = L.A;
+    for (let i = 0; i < L.n; i++) {
+      const k = (e - delay[i]) / 0.3;
+      if (k <= 0) continue;
+      const pull = Math.min(1, k) * 0.22 * (0.5 + Math.random());   // uneven, flickery pull
+      A[i] += (target[i] - A[i]) * pull;
+    }
+    if (e > 0.5) for (let j = 0; j < 4; j++) {               // stray sparks until the end
+      const i = (Math.random() * L.n) | 0;
+      if (target[i] < 0.1 && Math.random() < 1 - e) A[i] = Math.min(1, A[i] + 0.6);
+    }
+    draw();
+    if (p >= 1) {
+      intro.phase = 'hold';
+      intro.holdUntil = t + 1200 + Math.random() * 1600;
+    }
+  }
+
+  // ---- painting
+  let drawing = false, paintValue = 1;
+  function cellAt(e) {
+    const r = canvas.getBoundingClientRect();
+    return [Math.floor((e.clientX - r.left) / r.width * cols), Math.floor((e.clientY - r.top) / r.height * rows)];
+  }
+  function brush(cx, cy, val) {
+    const rad = Math.max(2, Math.round(cols / 80));
+    for (let dy = -rad; dy <= rad; dy++) for (let dx = -rad; dx <= rad; dx++) {
+      const d = Math.hypot(dx, dy) / rad; if (d > 1) continue;
+      const i = (((cy + dy) % rows + rows) % rows) * cols + (((cx + dx) % cols + cols) % cols);
+      const s = 1 - d * d;
+      L.A[i] = val ? Math.max(L.A[i], s) : L.A[i] * (1 - s);
+    }
+  }
+  canvas.addEventListener('pointerdown', e => {
+    const [x, y] = cellAt(e); intro = null; drawing = true; canvas.setPointerCapture(e.pointerId);
+    paintValue = L.A[y * cols + x] > 0.5 ? 0 : 1;
+    brush(x, y, paintValue); draw();
+  });
+  canvas.addEventListener('pointermove', e => { if (!drawing) return; const [x, y] = cellAt(e); brush(x, y, paintValue); draw(); });
+  const stopDraw = () => { drawing = false; };
+  canvas.addEventListener('pointerup', stopDraw); canvas.addEventListener('pointercancel', stopDraw);
+
+  // ---- controls
+  for (const c of CREATURES) { const o = document.createElement('option'); o.value = c.code; o.textContent = c.name; $('species').appendChild(o); }
+  $('species').onchange = e => { species = CREATURES.find(c => c.code === e.target.value); setup(false); spawn(); setRunning(true); };
+  $('play').onclick = () => { intro = null; setRunning(!running); };
+  $('step').onclick = () => { intro = null; setRunning(false); step(); draw(); };
+  $('random').onclick = () => { spawn(); setRunning(true); };
+  $('clear').onclick = () => { setRunning(false); clearField(); };
+  $('form').onclick = () => startIntro($('text').value);
+  $('text').addEventListener('keydown', e => { if (e.key === 'Enter') startIntro($('text').value); });
+  $('speed').oninput = e => { sps = +e.target.value; $('speedVal').textContent = sps; };
+  $('res').onchange = () => setup(true);
+  window.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.code === 'Space') { e.preventDefault(); intro = null; setRunning(!running); }
+    else if (e.key === 'n' || e.key === 'N') { intro = null; setRunning(false); step(); draw(); }
+    else if (e.key === 'r' || e.key === 'R') { spawn(); setRunning(true); }
+    else if (e.key === 'c' || e.key === 'C') { setRunning(false); clearField(); }
+    else if (e.key === 't' || e.key === 'T') startIntro($('text').value);
+  });
+  let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => setup(true), 150); });
+
+  setup(false);
+  startIntro($('text').value);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

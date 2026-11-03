@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Game of Life · forming text</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --border: #2a2f3a;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #5ee0a0;
+    --accent-dim: #2f7a58;
+    --cell: #5ee0a0;
+    --grid: #1c2029;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0 12px 0 0; letter-spacing: .02em; }
+  button, select {
+    background: #222733; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent-dim); }
+  input[type=text] { background: #222733; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; width: 120px; text-transform: uppercase; letter-spacing: .05em; }
+  input[type=text]:focus { outline: none; border-color: var(--accent-dim); }
+  button.primary { background: var(--accent); color: #0b1a12; border-color: var(--accent); font-weight: 600; min-width: 72px; }
+  button.primary:hover { filter: brightness(1.08); }
+  label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  input[type=range] { width: 110px; accent-color: var(--accent); }
+  .stats { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--text); font-weight: 600; }
+  main { flex: 1; position: relative; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  .hint { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--muted); background: rgba(24,27,34,.85); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); pointer-events: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Conway's Game of Life</h1>
+  <button id="play" class="primary">Play</button>
+  <button id="step">Step</button>
+  <button id="random">Random</button>
+  <button id="clear">Clear</button>
+  <input type="text" id="text" value="LIFE" maxlength="24" placeholder="Text" title="Text to form at the center">
+  <button id="form">Form text</button>
+  <select id="pattern" title="Insert a pattern at the center">
+    <option value="">Patterns…</option>
+    <option value="glider">Glider</option>
+    <option value="lwss">Lightweight spaceship</option>
+    <option value="pulsar">Pulsar</option>
+    <option value="gosper">Gosper glider gun</option>
+    <option value="rpentomino">R-pentomino</option>
+    <option value="acorn">Acorn</option>
+  </select>
+  <label>Speed <input type="range" id="speed" min="1" max="60" value="15"> <span id="speedVal">15</span> gen/s</label>
+  <label>Cell <input type="range" id="size" min="4" max="30" value="10"> <span id="sizeVal">10</span>px</label>
+  <div class="stats">Gen <b id="gen">0</b> · Alive <b id="alive">0</b></div>
+</header>
+<main>
+  <canvas id="c"></canvas>
+  <div class="hint">Click or drag to draw · Space = play/pause · N = step · R = random · C = clear · T = form text</div>
+</main>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  let cellSize = 10, cols = 0, rows = 0;
+  let grid, next;
+  let running = false, generation = 0, aliveCount = 0;
+  let fps = 15, lastTick = 0;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const newCols = Math.max(1, Math.floor(w / cellSize));
+    const newRows = Math.max(1, Math.floor(h / cellSize));
+    const ng = new Uint8Array(newCols * newRows);
+    if (grid) {
+      for (let y = 0; y < Math.min(rows, newRows); y++)
+        for (let x = 0; x < Math.min(cols, newCols); x++)
+          ng[y * newCols + x] = grid[y * cols + x];
+    }
+    cols = newCols; rows = newRows;
+    grid = ng; next = new Uint8Array(cols * rows);
+    draw();
+  }
+
+  function stepGrid() {
+    for (let y = 0; y < rows; y++) {
+      const yu = (y - 1 + rows) % rows, yd = (y + 1) % rows;
+      for (let x = 0; x < cols; x++) {
+        const xl = (x - 1 + cols) % cols, xr = (x + 1) % cols;
+        const n = grid[yu*cols+xl] + grid[yu*cols+x] + grid[yu*cols+xr]
+                + grid[y*cols+xl]                     + grid[y*cols+xr]
+                + grid[yd*cols+xl] + grid[yd*cols+x] + grid[yd*cols+xr];
+        const alive = grid[y*cols+x];
+        next[y*cols+x] = (n === 3 || (alive && n === 2)) ? 1 : 0;
+      }
+    }
+    [grid, next] = [next, grid];
+    generation++;
+    draw();
+  }
+
+  function draw() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    ctx.fillRect(0, 0, w, h);
+    if (cellSize >= 6) {
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = 0; x <= cols; x++) { ctx.moveTo(x * cellSize + .5, 0); ctx.lineTo(x * cellSize + .5, rows * cellSize); }
+      for (let y = 0; y <= rows; y++) { ctx.moveTo(0, y * cellSize + .5); ctx.lineTo(cols * cellSize, y * cellSize + .5); }
+      ctx.stroke();
+    }
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--cell').trim();
+    const pad = cellSize >= 6 ? 1 : 0;
+    aliveCount = 0;
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+      if (grid[y*cols+x]) {
+        aliveCount++;
+        ctx.fillRect(x * cellSize + pad, y * cellSize + pad, cellSize - pad, cellSize - pad);
+      }
+    }
+    $('gen').textContent = generation;
+    $('alive').textContent = aliveCount;
+  }
+
+  function loop(t) {
+    if (intro) tickIntro(t);
+    else if (running && t - lastTick >= 1000 / fps) { lastTick = t; stepGrid(); }
+    requestAnimationFrame(loop);
+  }
+
+  function setRunning(v) {
+    running = v;
+    $('play').textContent = running ? 'Pause' : 'Play';
+  }
+
+  function randomize(p = 0.3) {
+    intro = null;
+    for (let i = 0; i < grid.length; i++) grid[i] = Math.random() < p ? 1 : 0;
+    generation = 0; draw();
+  }
+  function clearGrid() { intro = null; grid.fill(0); generation = 0; draw(); }
+
+  // Patterns as ASCII (O = alive)
+  const PATTERNS = {
+    glider: ['.O.', '..O', 'OOO'],
+    lwss: ['.O..O', 'O....', 'O...O', 'OOOO.'],
+    rpentomino: ['.OO', 'OO.', '.O.'],
+    acorn: ['.O.....', '...O...', 'OO..OOO'],
+    pulsar: [
+      '..OOO...OOO..', '.............', 'O....O.O....O', 'O....O.O....O', 'O....O.O....O',
+      '..OOO...OOO..', '.............', '..OOO...OOO..', 'O....O.O....O', 'O....O.O....O',
+      'O....O.O....O', '.............', '..OOO...OOO..'
+    ],
+    gosper: [
+      '........................O...........',
+      '......................O.O...........',
+      '............OO......OO............OO',
+      '...........O...O....OO............OO',
+      'OO........O.....O...OO..............',
+      'OO........O...O.OO....O.O...........',
+      '..........O.....O.......O...........',
+      '...........O...O....................',
+      '............OO......................'
+    ]
+  };
+  function placePattern(name) {
+    const p = PATTERNS[name]; if (!p) return;
+    const ph = p.length, pw = Math.max(...p.map(r => r.length));
+    const ox = Math.floor((cols - pw) / 2), oy = Math.floor((rows - ph) / 2);
+    for (let y = 0; y < ph; y++) for (let x = 0; x < p[y].length; x++)
+      if (p[y][x] === 'O') { const gx = (ox + x + cols) % cols, gy = (oy + y + rows) % rows; grid[gy*cols+gx] = 1; }
+    draw();
+  }
+
+
+  // ---- Text intro: Life runs free for a while, then the cells are nudged into a word ----
+  let intro = null;
+  const textCanvas = document.createElement('canvas');
+  const tctx = textCanvas.getContext('2d');
+
+  function textMask(str) {
+    const mask = new Uint8Array(cols * rows);
+    str = (str || '').trim().toUpperCase();
+    if (!str) return mask;
+    textCanvas.width = cols; textCanvas.height = rows;
+    tctx.clearRect(0, 0, cols, rows);
+    const FONT = '"Marker Felt", "Chalkboard SE", "Comic Sans MS", "Segoe Print", cursive';
+    let fontPx = Math.floor(rows * 0.55);
+    tctx.font = `bold ${fontPx}px ${FONT}`;
+    const w = tctx.measureText(str).width;
+    if (w > cols * 0.8) fontPx = Math.floor(fontPx * (cols * 0.8) / w);
+    fontPx = Math.max(5, fontPx);
+    tctx.font = `bold ${fontPx}px ${FONT}`;
+    tctx.textAlign = 'center'; tctx.textBaseline = 'middle';
+    tctx.fillStyle = '#fff';
+    tctx.save();
+    // a little off-center and tilted, like it was written by hand
+    tctx.translate(cols / 2 + (Math.random() - 0.5) * cols * 0.04, rows / 2 + (Math.random() - 0.5) * rows * 0.05);
+    tctx.rotate((Math.random() - 0.5) * 0.09);
+    tctx.fillText(str, 0, 0);
+    tctx.restore();
+    const px = tctx.getImageData(0, 0, cols, rows).data;
+    for (let i = 0; i < cols * rows; i++) mask[i] = px[i * 4 + 3] > 110 ? 1 : 0;
+    // rough up the edges: drop some boundary cells, grow a few outside them
+    const rough = new Uint8Array(mask);
+    for (let y = 1; y < rows - 1; y++) for (let x = 1; x < cols - 1; x++) {
+      const i = y * cols + x;
+      const nb = mask[i-1] + mask[i+1] + mask[i-cols] + mask[i+cols];
+      if (mask[i] && nb < 4 && Math.random() < 0.18) rough[i] = 0;
+      else if (!mask[i] && nb > 0 && Math.random() < 0.07) rough[i] = 1;
+    }
+    return rough;
+  }
+
+  // smooth value noise in [0,1], scale = cells per noise cell
+  function valueNoise(scale) {
+    const nw = Math.ceil(cols / scale) + 2, nh = Math.ceil(rows / scale) + 2;
+    const lat = new Float32Array(nw * nh);
+    for (let i = 0; i < lat.length; i++) lat[i] = Math.random();
+    const out = new Float32Array(cols * rows);
+    const sm = t => t * t * (3 - 2 * t);
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+      const fx = x / scale, fy = y / scale;
+      const x0 = Math.floor(fx), y0 = Math.floor(fy);
+      const tx = sm(fx - x0), ty = sm(fy - y0);
+      const a = lat[y0 * nw + x0], b = lat[y0 * nw + x0 + 1];
+      const c = lat[(y0 + 1) * nw + x0], d = lat[(y0 + 1) * nw + x0 + 1];
+      out[y * cols + x] = (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+    }
+    return out;
+  }
+
+  function startIntro(str, duration = 6000, freeFor = 4000) {
+    setRunning(false);
+    generation = 0;
+    const target = textMask(str);
+    for (let i = 0; i < grid.length; i++) grid[i] = Math.random() < 0.3 ? 1 : 0;
+    // per-cell "settle time" in [0,1]: patchy noise + mild inward pull
+    const n1 = valueNoise(12), n2 = valueNoise(4);
+    const delay = new Float32Array(grid.length);
+    const cx = cols / 2, cy = rows / 2, maxR = Math.hypot(cx, cy);
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+      const i = y * cols + x;
+      const r = Math.hypot(x - cx, y - cy) / maxR;
+      delay[i] = 0.1 + 0.55 * n1[i] + 0.15 * n2[i] + 0.2 * r;
+    }
+    intro = { target, delay, start: performance.now(), duration, freeFor, last: 0 };
+    draw();
+  }
+
+  function tickIntro(t) {
+    if (t - intro.last < 1000 / 12) return;  // intro runs Life at ~12 gen/s
+    intro.last = t;
+    const { target, delay } = intro;
+    const elapsed = t - intro.start - intro.freeFor;
+    if (elapsed < 0) { stepGrid(); return; }   // free-running Life first, nothing pulls yet
+    const p = Math.min(1, elapsed / intro.duration);
+    const e = p * p * (3 - 2 * p); // ease in/out
+    stepGrid();                              // real Life rules keep churning underneath
+    for (let i = 0; i < grid.length; i++) {
+      if (grid[i] === target[i]) continue;
+      // how far past this cell's settle time we are -> probability it snaps to the word
+      const k = (e - delay[i]) / 0.3;
+      if (k <= 0) continue;
+      const prob = Math.min(1, k) * 0.22;
+      if (Math.random() < prob) grid[i] = target[i];
+    }
+    // occasional spark so the word doesn't look frozen while forming
+    if (e > 0.5) for (let j = 0; j < 3; j++) {
+      const i = (Math.random() * grid.length) | 0;
+      if (!target[i] && Math.random() < 1 - e) grid[i] = 1;
+    }
+    draw();
+    if (p >= 1) {
+      // one last imperfect pass: most stragglers get fixed, not all
+      for (let i = 0; i < grid.length; i++)
+        if (grid[i] !== target[i] && Math.random() < 0.6) grid[i] = target[i];
+      intro = null;
+      draw();
+      setTimeout(() => setRunning(true), 1200 + Math.random() * 1600);
+    }
+  }
+
+  // Mouse drawing
+  let drawing = false, paintValue = 1;
+  function cellAt(e) {
+    const r = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - r.left) / cellSize), y = Math.floor((e.clientY - r.top) / cellSize);
+    return (x >= 0 && y >= 0 && x < cols && y < rows) ? [x, y] : null;
+  }
+  canvas.addEventListener('pointerdown', e => {
+    const c = cellAt(e); if (!c) return;
+    intro = null; drawing = true; canvas.setPointerCapture(e.pointerId);
+    paintValue = grid[c[1]*cols+c[0]] ? 0 : 1;
+    grid[c[1]*cols+c[0]] = paintValue; draw();
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!drawing) return;
+    const c = cellAt(e); if (!c) return;
+    if (grid[c[1]*cols+c[0]] !== paintValue) { grid[c[1]*cols+c[0]] = paintValue; draw(); }
+  });
+  const stopDraw = () => { drawing = false; };
+  canvas.addEventListener('pointerup', stopDraw);
+  canvas.addEventListener('pointercancel', stopDraw);
+
+  // Controls
+  $('play').onclick = () => setRunning(!running);
+  $('step').onclick = () => { setRunning(false); stepGrid(); };
+  $('random').onclick = () => randomize();
+  $('clear').onclick = () => { setRunning(false); clearGrid(); };
+  $('form').onclick = () => startIntro($('text').value);
+  $('text').addEventListener('keydown', e => { if (e.key === 'Enter') startIntro($('text').value); });
+  $('pattern').onchange = e => { placePattern(e.target.value); e.target.value = ''; };
+  $('speed').oninput = e => { fps = +e.target.value; $('speedVal').textContent = fps; };
+  $('size').oninput = e => { cellSize = +e.target.value; $('sizeVal').textContent = cellSize; resize(); };
+  window.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.code === 'Space') { e.preventDefault(); setRunning(!running); }
+    else if (e.key === 'n' || e.key === 'N') { setRunning(false); stepGrid(); }
+    else if (e.key === 'r' || e.key === 'R') randomize();
+    else if (e.key === 'c' || e.key === 'C') { setRunning(false); clearGrid(); }
+    else if (e.key === 't' || e.key === 'T') startIntro($('text').value);
+  });
+  window.addEventListener('resize', resize);
+
+  resize();
+  startIntro($('text').value);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
